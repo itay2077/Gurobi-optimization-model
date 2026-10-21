@@ -1,0 +1,28 @@
+{
+  "created_at": "2026-08-25 11:11:27",
+  "total": 30,
+  "completed_names": [
+    "S006_Sol040_Bat040_B3.0_A850",
+    "S013_Sol040_Bat040_B4.0_A400",
+    "S014_Sol040_Bat040_B4.0_A500",
+    "S015_Sol040_Bat040_B4.0_A600",
+    "S016_Sol040_Bat040_B4.0_A700",
+    "S017_Sol040_Bat040_B4.0_A800",
+    "S018_Sol040_Bat040_B4.0_A850",
+    "S019_Sol040_Bat040_B4.5_A400",
+    "S020_Sol040_Bat040_B4.5_A500",
+    "S021_Sol040_Bat040_B4.5_A600",
+    "S022_Sol040_Bat040_B4.5_A700",
+    "S023_Sol040_Bat040_B4.5_A800",
+    "S024_Sol040_Bat040_B4.5_A850",
+    "S025_Sol040_Bat040_B5.0_A400",
+    "S026_Sol040_Bat040_B5.0_A500",
+    "S027_Sol040_Bat040_B5.0_A600",
+    "S028_Sol040_Bat040_B5.0_A700",
+    "S029_Sol040_Bat040_B5.0_A800",
+    "S030_Sol040_Bat040_B5.0_A850"
+  ],
+  "script": "OPT_ONE_SENS",
+  "outDir": "C:\\Users\\nhmu1\\OneDrive\\Desktop\\עבודה עוזר מחקר\\MODEL optimization-Itay\\OPT_ONE_SENS\\20260825_111020",
+  "next_index": 31
+}

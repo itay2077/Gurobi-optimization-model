@@ -1,0 +1,11 @@
+{
+  "created_at": "2026-10-06 14:34:49",
+  "total": 2,
+  "completed_names": [
+    "S001_Sol070_Bat070_B100.0_A500",
+    "S002_Sol070_Bat070_B100.0_A600"
+  ],
+  "script": "OPT_ONE_SENS",
+  "outDir": "C:\\Users\\nhmu1\\OneDrive\\Desktop\\עבודה עוזר מחקר\\MODEL optimization-Itay\\OPT_ONE_SENS\\20261006_143410",
+  "next_index": 3
+}

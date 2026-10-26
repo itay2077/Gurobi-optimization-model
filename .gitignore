@@ -1,4 +1,19 @@
-OPT_ONE_SENS/*/scenarios/
-*.asv
+# run outputs
+OPT_ONE_SENS/
+cost+B/
+emmision+B/
+figures_export/
+paper_figs/
+*.mat
+*.png
+
+# media, documents and temp files
 *.mp4
+theses/
+*.docx
+*.asv
+~$*
+
+# Excel: ignore all except the model input
 *.xlsx
+!ROTH 1 Model - Itay.xlsx

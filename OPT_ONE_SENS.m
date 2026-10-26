@@ -21,17 +21,21 @@ t_batch = tic;
 
 %% ---------- BASIC CONFIG ----------
 %runsRoot   = 'C:\Users\dore\Documents\MATLAB\EnergyOpt_Project\runs';
-runsRoot   ='C:\Users\nhmu1\OneDrive\Desktop\עבודה עוזר מחקר\MODEL optimization-Itay';
+MP = machine_paths();
+runsRoot = MP.runsRoot;
+xlsFile  = MP.xlsFile;
+addpath(MP.gurobiPath);
 scriptName = 'OPT_ONE_SENS';
 
 % Scenario lists (edit as needed)
-solarRampList = [70];   % upper bound 7 GW/yr; the schedule below is the binding limit
-battRampList  = [70];
-budgetList    = [420] * 1e9;      % NIS
-areaList  = [400 600 850];
+solarRampList = [150];   % upper bound 
+battRampList  = [150];
+areaList   = [400 600 800 1000 1200 1500 1800 2200];          % km2
+budgetList = [370 380 395 410 430 450 470 495] * 1e9;         % NIS
 ENABLE_NUCLEAR = false; % true = allow 3 GW nuclear (built end of 2042)
 ENABLE_BETA_SWEEP  = true;              % true = sweep battery-ELCC credit in the reserve margin (C13)
-betaList_onEnabled = [0.1 0.3 0.5 0.7];  % used only if ENABLE_BETA_SWEEP = true
+betaList_onEnabled = [1];  % used only if ENABLE_BETA_SWEEP = true
+RE_TARGET_2050 = 0;     % minimum renewable share in 2050 (0-1); fossil (gas + coal) <= 1 - target. 0 = no constraint
 
 if ENABLE_BETA_SWEEP
     betaList = betaList_onEnabled;
@@ -39,17 +43,31 @@ else
     betaList = 0;                        % baseline: battery gets no credit in C13 (today's behaviour)
 end
 % ---- time-varying build-rate limits [year GW/yr]; set RAMP_SCHEDULE = [] for constant limits ----
-RAMP_SCHEDULE.solar = [2025 2;  2030 3;  2035 5;  2040 7;  2050 7];
-RAMP_SCHEDULE.batt  = [2025 2;  2030 3;  2035 5;  2040 7;  2050 7];
+RAMP_SCHEDULE.solar = [2025 15;  2030 15;  2035 15;  2040 15;  2050 15];
+RAMP_SCHEDULE.batt  = [2025 15;  2030 15;  2035 15;  2040 15;  2050 15];
 
-OBJECTIVE      = 'cost';    % 'emissions' (current model) | 'cost' (economic minimum)
+OBJECTIVE      = 'emissions';    % 'emissions' (current model) | 'cost' (economic minimum)
 CARBON_PRICE   = 200;       % NIS/tCO2e inside the cost (0 = direct-cost minimum)
 if strcmp(OBJECTIVE, 'cost')
     budgetList = 1e13;      % effectively unconstrained (one run per land cap)
 end
+% ---- run registry ----
+CODE_VERSION    = 2;   % bump ONLY when a code/data change alters the results
+RUN_TAG         = '';  % optional short tag added to the run folder name
+RUN_DESCRIPTION = 'this run is lookin for the cheapes 100% scenario';  % one sentence: what this run is for
+TEST_CELLS      = [];  % moved here from BUILD SCENARIOS
+switch getenv('COMPUTERNAME')
+    case 'RAZIEL-LAB'                                   % lab computer
+        runsRoot   = 'D:\optimization_runs';
+        xlsFile    = 'D:\optimization_model\ROTH 1 Model - Itay.xlsx';
+        gurobiPath = 'C:\gurobi1302\win64\matlab';     % check the Gurobi folder on the lab PC
+    otherwise                                           % personal computer
+        runsRoot   = 'C:\Users\nhmu1\OneDrive\Desktop\עבודה עוזר מחקר\MODEL optimization-Itay';
+        xlsFile    = [runsRoot '\ROTH 1 Model - Itay.xlsx'];
+        gurobiPath = 'C:\gurobi1302\win64\matlab';
+end
+addpath(gurobiPath);% Gurobi path (adjust if needed)
 
-% Gurobi path (adjust if needed)
-addpath('C:\gurobi1302\win64\matlab'); savepath;
 
 
 %% ---------- OUTDIR SELECTION (pointer, choose, or new) ----------
@@ -106,8 +124,26 @@ if isempty(outDir)
             end
             outDir = sel;
         case 'N'
-            timestamp = datestr(now, 'yyyymmdd_HHMMSS');  % user requested date and time as name
-            outDir = fullfile(runsRoot, scriptName, timestamp);
+            regCfg = struct();
+            regCfg.REG_ROOT          = fullfile(runsRoot, scriptName);
+            regCfg.CODE_VERSION      = CODE_VERSION;
+            regCfg.RUN_TAG           = RUN_TAG;
+            regCfg.RUN_DESCRIPTION   = RUN_DESCRIPTION;
+            regCfg.OBJECTIVE         = OBJECTIVE;
+            regCfg.ENABLE_NUCLEAR    = ENABLE_NUCLEAR;
+            regCfg.ENABLE_BETA_SWEEP = ENABLE_BETA_SWEEP;
+            regCfg.betaList          = betaList;
+            regCfg.budgetList        = budgetList;
+            regCfg.areaList          = areaList;
+            regCfg.solarRampList     = solarRampList;
+            regCfg.battRampList      = battRampList;
+            regCfg.RAMP_SCHEDULE     = RAMP_SCHEDULE;
+            regCfg.CARBON_PRICE      = CARBON_PRICE;
+            regCfg.TEST_CELLS        = TEST_CELLS;
+            regCfg.codeFile          = [mfilename('fullpath') '.m'];
+            regCfg.dataFile          = xlsFile;
+            regCfg.RE_TARGET_2050    = RE_TARGET_2050;
+            outDir = registry('new_run', regCfg);
         otherwise
             error('Unrecognized choice. Aborting.');
     end
@@ -130,6 +166,7 @@ if fid > 0
     fprintf(fid, '%s\n', outDir);
     fclose(fid);
 end
+runInfo = registry('load_run', outDir);   % [] for runs created before the registry
 
 % 5) State file (meta, optional)
 stateFile = fullfile(d_meta, 'batch_state.json');
@@ -150,7 +187,6 @@ end
 
 %% ---------- ONE TIME INPUTS: DEMAND, CF, EMISSION FACTORS ----------
 %xlsFile   = 'C:\Users\dore\Desktop\Project\ROTH 1 Model.xlsx';
-xlsFile   = 'C:\Users\nhmu1\OneDrive\Desktop\עבודה עוזר מחקר\MODEL optimization-Itay\ROTH 1 Model - Itay.xlsx'
 sheetName = 'ROTH 1.0';
 rangeDem  = 'J6:J245285';        % Demand
 startYr   = 2023;
@@ -213,6 +249,7 @@ P_common            = struct();
 
 P_common.OBJECTIVE       = OBJECTIVE;
 P_common.EmissionsFactor = CARBON_PRICE;      % replaces the fixed 200
+P_common.RE_TARGET_2050  = RE_TARGET_2050;
 
 % Order: [1 Nuclear; 2 Solar; 3 Gas; 4 Coal; 5 Battery]
 P_common.n_sources  = 5;
@@ -278,9 +315,13 @@ for s = solarRampList
             for A = areaList
                 for beta = betaList
                      sid = sid + 1;
-                     scName = sprintf('S%03d_Sol%03d_Bat%03d_B%.1f_A%d', sid, s, b, B/1e11, A);
-                     if ENABLE_BETA_SWEEP
-                        scName = sprintf('%s_Beta%.1f', scName, beta);
+                     if isempty(runInfo)   % old run folder (resume only): keep the old names
+                         scName = sprintf('S%03d_Sol%03d_Bat%03d_B%.1f_A%d', sid, s, b, B/1e11, A);
+                         if ENABLE_BETA_SWEEP
+                             scName = sprintf('%s_Beta%.1f', scName, beta);
+                         end
+                     else
+                         scName = registry('scenario_name', runInfo, sid, B, A, beta, ENABLE_BETA_SWEEP);
                      end
 
                      Sc(sid).name         = scName;
@@ -301,7 +342,6 @@ for s = solarRampList
 end
 
 % ---- optional: run only selected cells [budget(1e9) area(km2)]; [] = full grid ----
-TEST_CELLS = [];
 if ~isempty(TEST_CELLS)
     keep = false(1, numel(Sc));
     for k = 1:numel(Sc)
@@ -618,6 +658,14 @@ if ~isempty(KPI_rows)
 else
     fprintf('\nNo KPI rows generated. Nothing to save.\n');
 end
+%% ---------- UPDATE THE VERSION INDEX ----------
+if ~isempty(runInfo)
+    try
+        registry('rebuild', runInfo.version, fullfile(runsRoot, scriptName));
+    catch ME
+        warning('Index not updated: %s', ME.message);
+    end
+end
 
 %% ---------- TOTAL BATCH DURATION ----------
 totalSec = toc(t_batch);
@@ -878,13 +926,19 @@ function RES = solve_opt_one_once(maxCost, maxAreaSolar, maxRamp, betaBattReserv
         sense(row,1) = '=';
     end
 
-    % (C8) Ramp limit: K(i,t) - K(i,t-1) <= maxRamp(i)
+    % (C8) Ramp limit: K(i,t) - K(i,t-1) <= min(maxRamp(i), rampYear(i, year of t))
+    % rampYear holds the time-varying build-rate schedule (NaN = no schedule for that source)
     for i = 1:n_sources
         for t = 2:T
+            lim = maxRamp(i);
+            if ~isempty(P.rampYear)
+                ry = P.rampYear(i, ceil(t / yearLen));
+                if ~isnan(ry), lim = min(lim, ry); end
+            end
             row = row + 1;
             addCoef(row, idxK(i,t),   1);
             addCoef(row, idxK(i,t-1), -1);
-            rhs(row,1)   = maxRamp(i);
+            rhs(row,1)   = lim;
             sense(row,1) = '<';
         end
     end
@@ -1038,6 +1092,20 @@ function RES = solve_opt_one_once(maxCost, maxAreaSolar, maxRamp, betaBattReserv
             
             sense(row,1) = '>';
         end
+    end
+
+        % (C14) Minimum renewable share in 2050 (hard constraint, set in BASIC CONFIG):
+    % sum_t [U_gas(t) + U_coal(t)] <= (1 - RE_TARGET_2050) * sum_t Demand(t),  t in 2050
+    if P.RE_TARGET_2050 > 0
+        y2050  = 2050 - startYr + 1;
+        rng50  = (y2050-1)*yearLen + (1:yearLen);
+        row    = row + 1;
+        for t = rng50
+            addCoef(row, idxU(3,t), 1);
+            addCoef(row, idxU(4,t), 1);
+        end
+        rhs(row,1)   = (1 - P.RE_TARGET_2050) * sum(Demand(rng50));
+        sense(row,1) = '<';
     end
 
 

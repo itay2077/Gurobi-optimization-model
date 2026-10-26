@@ -10,7 +10,7 @@ globalData = INITIALIZE_DATA();
 %% 2. Select SUMMARY Sheet / File
 % Select KPI_summary file (.mat or .csv)
 [KPI_Data, scenRoot, fullKpiFile] = SELECT_SUMMARY_FILE();
-
+%%
 % 3. SUMMARY Analysis
 % Open a single UI window with tabs allowing navigation through summary graphs for all scenarios
 ANALYZE_SUMMARY_UI(KPI_Data, scenRoot, globalData);
@@ -49,8 +49,7 @@ function globalData = INITIALIZE_DATA()
     fprintf('Initializing base data...\n');
     
     % Hardcoded path to the Excel file
-    xlsFile   = 'C:\Users\nhmu1\OneDrive\Desktop\עבודה עוזר מחקר\MODEL optimization-Itay\ROTH 1 Model - Itay.xlsx';
-    sheetName = 'ROTH 1.0';
+    MP = machine_paths();  xlsFile = MP.xlsFile; sheetName = 'ROTH 1.0';
     rangeDem  = 'J6:J245285';        
     startYr   = 2023;
     yearLen   = 8760;
@@ -969,8 +968,7 @@ function PLOT_CAPACITY_GROWTH_UI(RES, colorsBase, ax, type)
     
     baseYear = 2023;
     if isfield(RES,'BaseYear') && isfinite(RES.BaseYear), baseYear = RES.BaseYear; end
-    dt0 = datetime(baseYear, 1, 1, 0, 0, 0);
-    dtAll = dt0 + hours(0:T-1);
+    dtAll = local_modelDates(baseYear, T, 8760);
 
     srcNames = {'Nuclear','Solar','Gas','Coal','Battery'};
     srcColors = [colorsBase.Nuclear; colorsBase.Solar; colorsBase.Gas; colorsBase.Coal; colorsBase.Batt];
@@ -1089,8 +1087,7 @@ function PLOT_CUSTOM_RANGE_UI(RES, gData, ax, startDt, endDt, scName)
     end
 
     % Create full time vector based on the simulation start year
-    dt0 = datetime(gData.startYr, 1, 1, 0, 0, 0);
-    dtAll = dt0 + hours(0:gData.T-1);
+    dtAll = local_modelDates(gData.startYr, gData.T, gData.yearLen);
 
     % End date should include the full day (up to 23:59)
     endDtFull = endDt + hours(23);
@@ -1567,8 +1564,7 @@ function PLOT_CUSTOM_BATTERY_RANGE_UI(RES, gData, ax, startDt, endDt, scName)
         return;
     end
 
-    dt0 = datetime(gData.startYr, 1, 1, 0, 0, 0);
-    dtAll = dt0 + hours(0:gData.T-1);
+    dtAll = local_modelDates(gData.startYr, gData.T, gData.yearLen);
     
     % Include the full end day up to 23:59
     endDtFull = endDt + hours(23);
@@ -1696,4 +1692,14 @@ function C = local_costYear(RES, y)
     C.capex      = RES.buildCostYearBySource(:, y) / df;
     C.direct     = sum(C.opex) + sum(C.capex);
     C.energy_MWh = max(1, RES.elecYear(y));
+end
+
+function dtAll = local_modelDates(startYr, T, yearLen)
+% Calendar date of every model hour. Each model year has yearLen (8760) hours and
+% repeats the 2023 weather year, so every year follows a non-leap calendar.
+    if nargin < 3, yearLen = 8760; end
+    h     = 0:T-1;
+    yy    = startYr + floor(h / yearLen);
+    ref   = datetime(2023, 1, 1) + hours(mod(h, yearLen));
+    dtAll = datetime(yy, month(ref), day(ref), hour(ref), 0, 0);
 end

@@ -8,7 +8,7 @@ function P = machine_paths()
         case 'RAZIEL-LAB'                                   % lab computer
             P.runsRoot   = 'D:\optimization_runs';
             P.xlsFile    = 'D:\optimization_model\ROTH 1 Model - Itay.xlsx';
-            P.gurobiPath = 'C:\gurobi1302\win64\matlab';    % check the Gurobi folder on the lab PC
+            P.gurobiPath = 'D:\gurobi1303\win64\matlab';    % check the Gurobi folder on the lab PC
         otherwise                                           % personal computer
             P.runsRoot   = 'C:\Users\nhmu1\OneDrive\Desktop\עבודה עוזר מחקר\MODEL optimization-Itay';
             P.xlsFile    = [P.runsRoot '\ROTH 1 Model - Itay.xlsx'];

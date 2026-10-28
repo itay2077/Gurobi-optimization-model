@@ -1,0 +1,477 @@
+--- /dev/fd/63	2026-10-28 10:13:56.541825198 +0000
++++ /dev/fd/62	2026-10-28 10:13:56.541825198 +0000
+@@ -2,7 +2,8 @@
+ %  OPT_ONE_SENS.m  - Batch runner for OPT ONE model
+ %  - Builds a grid of scenarios (ramp, budget, area)
+ %  - For each scenario:
+-%       * Runs MILP optimization (min emissions with cost and land limits)
++%       * Runs an LP optimization with Gurobi (min emissions with cost and land
++%         limits, or min cost when OBJECTIVE = 'cost')
+ %       * Computes annual KPIs and LCOE
+ %       * Saves results_heavy.mat
+ %       * Writes per-scenario kpi_row.csv
+@@ -14,27 +15,38 @@
+ %       * If scDir has results_heavy.mat         -> skip (completed)
+ %       * If scDir has error.txt only            -> skip (failed, not rerun)
+ %       * If scDir exists but neither file exists -> run (incomplete)
++%
++%  CODE_VERSION 3 (paper model) - changes vs. version 2:
++%   (1) Demand path: Noga 2022 long-term forecast, set in the Excel (DEMAND_PATH = 'excel');
++%       code options for sensitivities and an optional flat data-centre load
++%   (2) Retirement: legacy capacity follows LEGACY_RETIRE (coal out from
++%       1.1.2030, 8.0 GW legacy gas out from 1.1.2040), new builds retire after
++%       lifeTime, CAPEX annuity paid only over the asset lifetime
++%   (3) Land constraint (C6) written once per year instead of once per hour
++%   (4) Build-rate limit (C8) applied to new builds Z instead of the net change in K
++%   (5) Shadow prices saved: land (per year) and budget
++%   (6) Paths taken only from machine_paths.m; build-rate schedule +50%
++%   (7) Solver moved to solve_opt_one_once.m (so run_model_tests.m can call it)
+ %% ============================================================
+ 
+ clear; clc;
+ t_batch = tic;
+ 
+ %% ---------- BASIC CONFIG ----------
+-%runsRoot   = 'C:\Users\dore\Documents\MATLAB\EnergyOpt_Project\runs';
+-MP = machine_paths();
++MP = machine_paths();        % per-computer paths (lab PC / personal PC)
+ runsRoot = MP.runsRoot;
+ xlsFile  = MP.xlsFile;
+ addpath(MP.gurobiPath);
+ scriptName = 'OPT_ONE_SENS';
+ 
+ % Scenario lists (edit as needed)
+-solarRampList = [150];   % upper bound 
++solarRampList = [150];   % x100 MW/yr = 15 GW/yr; non-binding cap, RAMP_SCHEDULE is the real limit
+ battRampList  = [150];
+ areaList   = [400 600 800 1000 1200 1500 1800 2200];          % km2
+-budgetList = [370 380 395 410 430 450 470 495] * 1e9;         % NIS
++budgetList = [370 380 395 410 430 450 470 495] * 1e9;         % NIS - TO BE RESET after the cost-min runs (demand path changed)
+ ENABLE_NUCLEAR = false; % true = allow 3 GW nuclear (built end of 2042)
+ ENABLE_BETA_SWEEP  = true;              % true = sweep battery-ELCC credit in the reserve margin (C13)
+-betaList_onEnabled = [1];  % used only if ENABLE_BETA_SWEEP = true
++betaList_onEnabled = [1];  % paper runs: beta = 1 (discussed in the paper, not swept in the main grid)
+ RE_TARGET_2050 = 0;     % minimum renewable share in 2050 (0-1); fossil (gas + coal) <= 1 - target. 0 = no constraint
+ 
+ if ENABLE_BETA_SWEEP
+@@ -43,8 +55,35 @@
+     betaList = 0;                        % baseline: battery gets no credit in C13 (today's behaviour)
+ end
+ % ---- time-varying build-rate limits [year GW/yr]; set RAMP_SCHEDULE = [] for constant limits ----
+-RAMP_SCHEDULE.solar = [2025 15;  2030 15;  2035 15;  2040 15;  2050 15];
+-RAMP_SCHEDULE.batt  = [2025 15;  2030 15;  2035 15;  2040 15;  2050 15];
++% Optimistic schedule = 1.5 x the reference schedule. Reference anchored on:
++% 2025 record additions (~1.3-1.4 GW), 2030 target 16 GW RE, 2035 plan 26 GW RE,
++% storage >9 GW by 2030 (Electricity Authority), 250-320 W/capita/yr (NL 2023, UAE 2023).
++% Values are linearly interpolated between the anchor years; 2023-2024 take the 2025 value.
++RAMP_SCHEDULE.solar = [2025 2.25; 2030 3.00; 2035 3.75; 2040 5.25; 2050 6.75];
++RAMP_SCHEDULE.batt  = [2025 1.50; 2030 3.00; 2035 3.00; 2040 3.75; 2050 4.50];
++
++% ---- demand path (applied to the hourly profile read from the Excel) ----
++% 'excel'         : the Excel column J as is. BASE CASE - the Excel holds the Noga 2022 path
++%                   (sheet 'חישוב אחוזים', row 18: x1.031 to 2030, x1.037 2031-40, x1.028 2041-50).
++%                   run_model_tests.m checks that the Excel matches this path.
++% 'noga2022'      : rescale in code to the Noga 2022 path (same result as a correct Excel; cross-check)
++% 'noga2026_low'  : 2.71%/yr from the 2023 Excel value (Noga 2026 low, press-reported; sensitivity)
++% 'noga2026_high' : 3.84%/yr from the 2023 Excel value (Noga 2026 high, press-reported; sensitivity)
++DEMAND_PATH   = 'excel';
++DC_FLAT_MW    = 0;       % extra flat load (data centres) in MW; 0 = off
++DC_START_YEAR = 2030;    % first year of the extra flat load
++
++% ---- retirement ----
++% ENABLE_RETIREMENT = false reproduces version 2 (no retirement, annuity to 2050).
++% LEGACY_RETIRE rows: [MW  lastYearInService]; Inf = stays to 2050.
++% Order: 1 Nuclear, 2 Solar, 3 Gas, 4 Coal, 5 Battery. Rows of each source must sum to init_cap.
++ENABLE_RETIREMENT = true;
++LEGACY_RETIRE = { ...
++    zeros(0,2), ...                 % nuclear: none
++    [5900 Inf], ...                 % solar: assumed installed ~2020 -> 30 yr -> beyond 2050
++    [8000 2039; 3700 Inf], ...      % gas: legacy IEC units out from 1.1.2040; IPP units stay
++    [5600 2029], ...                % coal: out from 1.1.2030
++    [369 2042] };                   % battery: installed ~2022 -> 20 yr -> out from 1.1.2043
+ 
+ OBJECTIVE      = 'emissions';    % 'emissions' (current model) | 'cost' (economic minimum)
+ CARBON_PRICE   = 200;       % NIS/tCO2e inside the cost (0 = direct-cost minimum)
+@@ -52,21 +91,11 @@
+     budgetList = 1e13;      % effectively unconstrained (one run per land cap)
+ end
+ % ---- run registry ----
+-CODE_VERSION    = 2;   % bump ONLY when a code/data change alters the results
++CODE_VERSION    = 3;   % bump ONLY when a code/data change alters the results
+ RUN_TAG         = '';  % optional short tag added to the run folder name
+-RUN_DESCRIPTION = 'this run is lookin for the cheapes 100% scenario';  % one sentence: what this run is for
++RUN_DESCRIPTION = '';  % one sentence: what this run is for
+ TEST_CELLS      = [];  % moved here from BUILD SCENARIOS
+-switch getenv('COMPUTERNAME')
+-    case 'RAZIEL-LAB'                                   % lab computer
+-        runsRoot   = 'D:\optimization_runs';
+-        xlsFile    = 'D:\optimization_model\ROTH 1 Model - Itay.xlsx';
+-        gurobiPath = 'C:\gurobi1302\win64\matlab';     % check the Gurobi folder on the lab PC
+-    otherwise                                           % personal computer
+-        runsRoot   = 'C:\Users\nhmu1\OneDrive\Desktop\עבודה עוזר מחקר\MODEL optimization-Itay';
+-        xlsFile    = [runsRoot '\ROTH 1 Model - Itay.xlsx'];
+-        gurobiPath = 'C:\gurobi1302\win64\matlab';
+-end
+-addpath(gurobiPath);% Gurobi path (adjust if needed)
++% Paths (runsRoot, xlsFile, Gurobi) come only from machine_paths.m - edit them there.
+ 
+ 
+ 
+@@ -143,6 +172,11 @@
+             regCfg.codeFile          = [mfilename('fullpath') '.m'];
+             regCfg.dataFile          = xlsFile;
+             regCfg.RE_TARGET_2050    = RE_TARGET_2050;
++            regCfg.DEMAND_PATH       = DEMAND_PATH;
++            regCfg.DC_FLAT_MW        = DC_FLAT_MW;
++            regCfg.DC_START_YEAR     = DC_START_YEAR;
++            regCfg.ENABLE_RETIREMENT = ENABLE_RETIREMENT;
++            regCfg.LEGACY_RETIRE     = LEGACY_RETIRE;
+             outDir = registry('new_run', regCfg);
+         otherwise
+             error('Unrecognized choice. Aborting.');
+@@ -200,6 +234,43 @@
+ T      = numel(Demand);
+ nYears = floor(T / yearLen);
+ 
++% ---- rescale annual totals to the selected demand path (hourly shape unchanged) ----
++yrsD   = startYr:(startYr + nYears - 1);
++annExcel = zeros(1, nYears);
++for y = 1:nYears
++    annExcel(y) = sum(Demand((y-1)*yearLen + (1:yearLen)));
++end
++switch DEMAND_PATH
++    case 'excel'
++        gD = [];
++    case 'noga2022'
++        gD = 0.031 * (yrsD <= 2030) + 0.037 * (yrsD > 2030 & yrsD <= 2040) + 0.028 * (yrsD > 2040);
++    case 'noga2026_low'
++        gD = 0.0271 * ones(1, nYears);
++    case 'noga2026_high'
++        gD = 0.0384 * ones(1, nYears);
++    otherwise
++        error('Unknown DEMAND_PATH: %s', DEMAND_PATH);
++end
++annTarget = annExcel;
++if ~isempty(gD)
++    for y = 2:nYears
++        annTarget(y) = annTarget(y-1) * (1 + gD(y));   % growth of year y applied to year y-1
++    end
++end
++for y = 1:nYears
++    rngD = (y-1)*yearLen + (1:yearLen);
++    Demand(rngD) = Demand(rngD) * (annTarget(y) / annExcel(y));
++    if DC_FLAT_MW > 0 && yrsD(y) >= DC_START_YEAR
++        Demand(rngD) = Demand(rngD) + DC_FLAT_MW;
++    end
++end
++fprintf('Demand path ''%s'' (+%g MW flat from %d): TWh in 2023/2030/2040/2050 = ', DEMAND_PATH, DC_FLAT_MW, DC_START_YEAR);
++for yy = [2023 2030 2040 2050]
++    fprintf('%.1f ', sum(Demand((yy-startYr)*yearLen + (1:yearLen))) / 1e6);
++end
++fprintf('\n');
++
+ % Costs
+ %%
+ cap = readtable(xlsFile, 'Sheet', sheetCapex);
+@@ -253,7 +324,7 @@
+ 
+ % Order: [1 Nuclear; 2 Solar; 3 Gas; 4 Coal; 5 Battery]
+ P_common.n_sources  = 5;
+-P_common.init_cap   = [0;5900;11700;5600;369];        % MW
++P_common.init_cap   = [0;5900;11700;5600;369];        % MW (must match LEGACY_RETIRE)
+ P_common.c          = [0.012;0.03695;0.486;0.9;0.04]; % t CO2 / MWh
+ P_common.p          = [1000;100;100;100;100];         % MW per build step
+ P_common.lifeTime   = [60,30,30,30,20];               % years
+@@ -267,6 +338,25 @@
+                       ((1 + P_common.r).^P_common.lifeTime - 1);
+ 
+ P_common.capex_per_MW = [235; 31; 37; 150; 13] .* (P_common.CRF') * 1e5; % Example if used later
++
++% ---- legacy (existing) capacity available in each model year [MW] ----
++P_common.ENABLE_RETIREMENT = ENABLE_RETIREMENT;
++yrsL = startYr:(startYr + nYears - 1);
++P_common.legacyYear = zeros(P_common.n_sources, nYears);
++for i = 1:P_common.n_sources
++    tr = LEGACY_RETIRE{i};
++    assert(abs(sum(tr(:,1)) - P_common.init_cap(i)) < 1e-6, ...
++        'LEGACY_RETIRE for source %d does not sum to init_cap', i);
++    for r = 1:size(tr,1)
++        if ENABLE_RETIREMENT
++            P_common.legacyYear(i,:) = P_common.legacyYear(i,:) + tr(r,1) * (yrsL <= tr(r,2));
++        else
++            P_common.legacyYear(i,:) = P_common.legacyYear(i,:) + tr(r,1);
++        end
++    end
++end
++disp('Legacy capacity [GW] in 2023, 2029, 2030, 2039, 2040, 2043, 2050 (rows: Nuc, Solar, Gas, Coal, Batt):');
++disp(round(P_common.legacyYear(:, [2023 2029 2030 2039 2040 2043 2050] - startYr + 1) / 1e3, 2));
+ P_common.areaPerSolar = 0.0075;                       % km^2 / MW solar
+ 
+ 
+@@ -540,6 +630,11 @@
+         TotalDump_AllYears_MWh    = RES.TotalDump_AllYears_MWh;
+         Dump2050_MWh              = RES.Dump2050_MWh;
+ 
++        % Shadow prices and land exhaustion
++        Dual_Land_Sum             = RES.Dual_Land_Sum;
++        Dual_Budget               = RES.Dual_Budget;
++        LandFullYear              = RES.LandFullYear;
++
+         % Technical run info
+         durSec       = toc(t0);
+         Runtime_hrs  = durSec / 3600;
+@@ -577,6 +672,7 @@
+         Cap2050_Nuclear, Cap2050_Solar, Cap2050_Gas, Cap2050_Coal, Cap2050_Battery, ...
+         SolarLand_km2, ...
+         TotalDump_AllYears_MWh, Dump2050_MWh, ...
++        Dual_Land_Sum, Dual_Budget, LandFullYear, ...
+         Runtime_hrs, ResultStatus, MIPGap, ...
+         'VariableNames', { ...
+             'Scenario', ...
+@@ -595,6 +691,7 @@
+             'Cap2050_Nuclear','Cap2050_Solar','Cap2050_Gas','Cap2050_Coal','Cap2050_Battery', ...
+             'SolarLand_km2', ...
+             'TotalDump_AllYears_MWh','Dump2050_MWh', ...
++            'Dual_Land_Sum','Dual_Budget','LandFullYear', ...
+             'Runtime_hrs','ResultStatus','MIPGap' ...
+         } ...
+     );
+@@ -684,6 +781,13 @@
+         txt, ...
+         repmat('=', 1, numel(txt)));
+ end
++
++% The solver (solve_opt_one_once) and addCoef live in solve_opt_one_once.m
++% SOLVE_OPT_ONE_ONCE  Build and solve one scenario of the OPT ONE LP (CODE_VERSION 3).
++%   RES = solve_opt_one_once(maxCost, maxAreaSolar, maxRamp, betaBattReserve, P)
++%   P is P_common built in OPT_ONE_SENS.m. With P.BUILD_ONLY = true the
++%   model is built and returned in RES.model without calling Gurobi.
++%   Called by OPT_ONE_SENS.m and by run_model_tests.m.
+ function RES = solve_opt_one_once(maxCost, maxAreaSolar, maxRamp, betaBattReserve, P)
+ % Single scenario solver based on OPT ONE formulation (with safe TimeLimit handling)
+ % All code comments in English as requested.
+@@ -731,6 +835,8 @@
+     % --- Economic Discounting ---
+     CRF           = P.CRF;
+     df_yearly     = P.df_yearly;
++    legacyYear    = P.legacyYear;          % legacy capacity per year [MW]
++    retireOn      = P.ENABLE_RETIREMENT;   % new builds retire after lifeTime, annuity truncated
+ 
+     TargetYear = 2050; % KPI target year
+ 
+@@ -827,13 +933,18 @@
+         end
+     end
+ 
+-    % (C3) Capacity dynamics
++    % (C3) Capacity dynamics with retirement
++    %   K(i,t) = K(i,t-1) + p*Z(i,t) - p*Z(i,t-L_i*8760) + [legacy(y+1) - legacy(y)]
++    % Builds, new-build retirements and legacy retirements all happen at the
++    % year-end hour t = 8760*y, so the new level holds for the following year.
++    % With retireOn = false and a constant legacy schedule this equals version 2.
+     for i = 1:n_sources
++        Lh = lifeTime(i) * yearLen;            % lifetime in hours
+         % t = 1
+         row = row + 1;
+         addCoef(row, idxK(i,1), 1);
+         addCoef(row, idxZ(i,1), -p(i));
+-        rhs(row,1)   = init_cap(i);
++        rhs(row,1)   = legacyYear(i,1);
+         sense(row,1) = '=';
+ 
+         % t >= 2
+@@ -842,7 +953,17 @@
+             addCoef(row, idxK(i,t),   1);
+             addCoef(row, idxK(i,t-1), -1);
+             addCoef(row, idxZ(i,t),   -p(i));
+-            rhs(row,1)   = 0;
++            dLeg = 0;
++            if mod(t, yearLen) == 0
++                yE = t / yearLen;
++                if yE < nYears
++                    dLeg = legacyYear(i, yE+1) - legacyYear(i, yE);   % legacy retirement (<= 0)
++                end
++                if retireOn && t - Lh >= 1
++                    addCoef(row, idxZ(i, t - Lh), p(i));             % vintage built L years ago retires
++                end
++            end
++            rhs(row,1)   = dLeg;
+             sense(row,1) = '=';
+         end
+     end
+@@ -870,11 +991,16 @@
+     end
+ 
+     % (C6) Solar land use: areaPerSolar * K_solar(t) <= maxAreaSolar
+-    for t = 1:T
++    % K changes only at year-end hours, so one row per capacity level is enough:
++    % t = 1 (first-year level) and t = 8760*y (level held during year y+1).
++    tLand    = [1, yearLen:yearLen:T];
++    landRows = zeros(numel(tLand), 1);
++    for kL = 1:numel(tLand)
+         row = row + 1;
+-        addCoef(row, idxK(2,t), areaPerSolar);
++        addCoef(row, idxK(2,tLand(kL)), areaPerSolar);
+         rhs(row,1)   = maxAreaSolar;
+         sense(row,1) = '<';
++        landRows(kL) = row;
+     end
+     
+ 
+@@ -891,10 +1017,16 @@
+             addCoef(row, idxC(t-1), -1);
+         end
+         
+-        % 1. CAPEX on NEW builds Z 
++        % 1. CAPEX on NEW builds Z: annuity paid from the build year for lifeTime
++        %    years (retireOn) or to the end of the horizon (version 2)
+         if mod(t, 8760) == 0
+-            pv_multiplier = sum(df_yearly(idxy:nYears));
+             for i = 1:n_sources
++                if retireOn
++                    yLast = min(nYears, idxy + lifeTime(i) - 1);
++                else
++                    yLast = nYears;
++                end
++                pv_multiplier = sum(df_yearly(idxy:yLast));
+                 annualized_capex = cap_opt(idxy,i) * p(i) * CRF(i); 
+                 addCoef(row, idxZ(i,t), -annualized_capex * pv_multiplier);
+             end
+@@ -926,18 +1058,20 @@
+         sense(row,1) = '=';
+     end
+ 
+-    % (C8) Ramp limit: K(i,t) - K(i,t-1) <= min(maxRamp(i), rampYear(i, year of t))
++    % (C8) Build-rate limit on NEW builds: p*Z(i,t) <= min(maxRamp(i), rampYear(i,y)), t = 8760*y
++    % Applied to builds (not to the net change in K) so that replacing retired
++    % capacity also counts against the limit. Without retirement this equals version 2.
+     % rampYear holds the time-varying build-rate schedule (NaN = no schedule for that source)
+     for i = 1:n_sources
+-        for t = 2:T
++        for y = 1:nYears-1
++            t   = y * yearLen;
+             lim = maxRamp(i);
+             if ~isempty(P.rampYear)
+-                ry = P.rampYear(i, ceil(t / yearLen));
++                ry = P.rampYear(i, y);
+                 if ~isnan(ry), lim = min(lim, ry); end
+             end
+             row = row + 1;
+-            addCoef(row, idxK(i,t),   1);
+-            addCoef(row, idxK(i,t-1), -1);
++            addCoef(row, idxZ(i,t), p(i));
+             rhs(row,1)   = lim;
+             sense(row,1) = '<';
+         end
+@@ -1120,6 +1254,16 @@
+     model.ub         = ub;
+     model.modelsense = 'min';
+ 
++    % ---------- Build-only mode (used by run_model_tests.m) ----------
++    if isfield(P, 'BUILD_ONLY') && P.BUILD_ONLY
++        RES = struct();
++        RES.model    = model;
++        RES.landRows = landRows;
++        RES.tLand    = tLand;
++        RES.numVars  = numVars;
++        return;
++    end
++
+     % ---------- Gurobi params ----------
+     params = struct();
+     params.Method         = 2;    % barrier
+@@ -1129,7 +1273,7 @@
+     params.Presolve       = 2;
+     params.ScaleFlag      = 1;
+ 
+-    params.TimeLimit     = 14400; % 2 hours (edit as needed)
++    params.TimeLimit     = 14400; % 4 hours (edit as needed)
+ 
+     fprintf('Number of variables:   %d\n', length(model.obj));
+     fprintf('Number of constraints: %d\n', size(model.A, 1));
+@@ -1216,6 +1360,11 @@
+         RES.TotalDump_AllYears_MWh     = NaN;
+         RES.Dump2050_MWh               = NaN;
+ 
++        RES.Dual_Land_year             = NaN(numel(landRows),1);
++        RES.Dual_Land_Sum              = NaN;
++        RES.Dual_Budget                = NaN;
++        RES.LandFullYear               = NaN;
++
+         RES.meta = struct('n_sources', n_sources, 'T', T, 'yearLen', yearLen, 'startYr', startYr, ...
+                           'maxCost', maxCost, 'maxAreaSolar', maxAreaSolar, 'maxRamp', maxRamp, ...
+                           'note', "No incumbent solution vector result.x (TimeLimit/NoSolution/Infeasible).");
+@@ -1238,6 +1387,28 @@
+     E    = result.x(idxE(1:T));
+     C    = result.x(idxC(1:T));
+ 
++    % ---------- Shadow prices ----------
++    % Units: objective units per unit of constraint.
++    %   OBJECTIVE = 'emissions': land -> tCO2e per km^2 ; budget -> tCO2e per million NIS
++    %   OBJECTIVE = 'cost'     : land -> million NIS per km^2 (budget not active)
++    % Gurobi sign (minimisation): a binding '<' constraint has pi <= 0
++    % (relaxing it lowers the objective). Values are reported as positive magnitudes.
++    Dual_Land_year = NaN(numel(landRows),1);
++    Dual_Budget    = NaN;
++    if isfield(result,'pi') && ~isempty(result.pi)
++        Dual_Land_year = -result.pi(landRows);
++    end
++    if isfield(result,'rc') && ~isempty(result.rc) && isfinite(ub(idxC(T)))
++        Dual_Budget = -result.rc(idxC(T));
++    end
++    % first year in which the land cap is full (level held during that year)
++    landLevel   = areaPerSolar * result.x(idxK(2, tLand));   % per row in tLand
++    fullIdx     = find(landLevel >= maxAreaSolar - 1e-3, 1, 'first');
++    LandFullYear = NaN;
++    if ~isempty(fullIdx)
++        LandFullYear = min(startYr + fullIdx - 1, startYr + nYears - 1);   % row k = level held in year startYr+k-1
++    end
++
+     %%
+ % ---------- Post-solve totals (MATCH MODEL LOGIC) ----------
+     
+@@ -1264,7 +1435,12 @@
+         for y_build = 1:Y
+             % Z is in blocks, multiply by p to get MW
+             mw_built = Z_built(:, y_build) .* p; 
+-            capex_payment = capex_payment + mw_built .* (cap(y_build, :)' .* CRF');
++            if retireOn
++                alive = (Y - y_build) <= (lifeTime(:) - 1);   % annuity paid only over the lifetime
++            else
++                alive = true(n_sources,1);
++            end
++            capex_payment = capex_payment + alive .* mw_built .* (cap(y_build, :)' .* CRF');
+         end
+         totalCAPEX = totalCAPEX + sum(capex_payment) * df_yearly(Y);
+     end
+@@ -1357,6 +1533,9 @@
+             % Build cost per source this year (Vintage based, Annualized & Discounted)
+             capex_payment = 0;
+             for y_build = 1:y
++                if retireOn && (y - y_build) > (lifeTime(i) - 1)
++                    continue;   % annuity already fully paid
++                end
+                 % Z is blocks. Multiply by p(i) to get MW.
+                 mw_built = Z_built(i, y_build) * p(i);
+                 capex_payment = capex_payment + mw_built * (cap(y_build, i) * CRF(i));
+@@ -1526,7 +1705,7 @@
+     RES.opCostYearBySource    = opCostYearBySource;
+     RES.extCostYearBySource   = extCostYearBySource;
+     RES.buildCostYearBySource = buildCostYearBySource;
+-    RES.ExternalitiesYear     = ExternalitiesYear
++    RES.ExternalitiesYear     = ExternalitiesYear;
+     RES.capexYear             = capexYear;
+     RES.opexYear              = opexYear;
+     RES.totalAnnualCost_actual= totalAnnualCost_actual;
+@@ -1567,6 +1746,11 @@
+     RES.TotalDump_AllYears_MWh = TotalDump_AllYears_MWh;
+     RES.Dump2050_MWh           = Dump2050_MWh;
+ 
++    RES.Dual_Land_year = Dual_Land_year;        % row k = capacity level held in year startYr+k-1 (last row = end of 2050)
++    RES.Dual_Land_Sum  = sum(Dual_Land_year, 'omitnan');
++    RES.Dual_Budget    = Dual_Budget;
++    RES.LandFullYear   = LandFullYear;
++
+     % Keep status/gap/runtime already set earlier
+     RES.meta = struct( ...
+         'n_sources', n_sources, ...

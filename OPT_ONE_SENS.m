@@ -27,6 +27,8 @@
 %   (5) Shadow prices saved: land (per year) and budget
 %   (6) Paths taken only from machine_paths.m; build-rate schedule +50%
 %   (7) Solver moved to solve_opt_one_once.m (so run_model_tests.m can call it)
+%  CODE_VERSION 4: (8) tie-breaking cost term EPS_COST_TIEBREAK in the emissions
+%       objective (see BASIC CONFIG); budget shadow price corrected for it
 %% ============================================================
 
 clear; clc;
@@ -42,8 +44,11 @@ scriptName = 'OPT_ONE_SENS';
 % Scenario lists (edit as needed)
 solarRampList = [150];   % x100 MW/yr = 15 GW/yr; non-binding cap, RAMP_SCHEDULE is the real limit
 battRampList  = [150];
-areaList   = [400 1000];   % km2; 1000 = land not binding (build-rate-limited reference)];          % km2
-budgetList = [392 400 410 425 450 490 550] * 1e9;         % NIS - TO BE RESET after the cost-min runs (demand path changed)
+areaList   = [400 500 600 700 800 900 1000];                  % km2; ~905 km2 = max solar the build-rate schedule allows, 1000 = land not binding
+budgetList = [382.5 385 387.5 390 392.5 395 400 410 425 440] * 1e9;   % NIS. Dense where emissions fall steeply.
+% Cost-min (run A, v3): 391.1 (400 km2), 387.0 (500), 384.1 (600), 382.7 (700), 382.5 (800-1000) bn NIS.
+% Reference scenario (separate run): areaList = [100], budgetList = 440e9 (cost-min at 100 km2 = 436.6 bn).
+% Budgets below a cap's cost-min are INFEASIBLE by design and are kept (they are results too).
 ENABLE_NUCLEAR = false; % true = allow 3 GW nuclear (built end of 2042)
 ENABLE_BETA_SWEEP  = true;              % true = sweep battery-ELCC credit in the reserve margin (C13)
 betaList_onEnabled = [1];  % paper runs: beta = 1 (discussed in the paper, not swept in the main grid)
@@ -86,14 +91,31 @@ LEGACY_RETIRE = { ...
     [369 2042] };                   % battery: installed ~2022 -> 20 yr -> out from 1.1.2043
 
 OBJECTIVE      = 'emissions';    % 'emissions' (current model) | 'cost' (economic minimum)
+
+% ---- tie-breaking cost term (emissions objective only) ----
+% Objective = total emissions [tCO2e] + EPS_COST_TIEBREAK * C(T) [million NIS].
+% Why: once the budget no longer binds, many solutions have the same minimum
+% emissions and the LP picks an arbitrary one (e.g. 77 GW of idle gas that just
+% spends the budget). The small cost term makes the solver choose the cheapest
+% of the minimum-emission solutions, so reported capacities and costs are real.
+% Why 0.01 tCO2e per million NIS:
+%   * The model would give up 1 t of abatement only to save 100 million NIS
+%     (1/0.01), far above any real abatement cost -> emissions are unaffected.
+%   * Upper bound on the change in emissions: 0.01 x ~4e5 million NIS of total
+%     cost = 4,000 t, i.e. < 0.001% of ~670 Mt (~0.8 million NIS at 200 NIS/t).
+%   * Not smaller: barrier converges to ~1e-8 of the objective (~7 t). With
+%     0.01, wasting 50 bn NIS shows up as 500 t, well above that noise; with
+%     1e-4 it would be 5 t, inside the noise, and ties would stay arbitrary.
+% Set to 0 to recover the pure emissions objective (version 3 behaviour).
+EPS_COST_TIEBREAK = 0.01;   % tCO2e per million NIS
 CARBON_PRICE   = 200;       % NIS/tCO2e inside the cost (0 = direct-cost minimum)
 if strcmp(OBJECTIVE, 'cost')
     budgetList = 1e13;      % effectively unconstrained (one run per land cap)
 end
 % ---- run registry ----
-CODE_VERSION    = 3;   % bump ONLY when a code/data change alters the results
-RUN_TAG         = 'pilot_budget';  % optional short tag added to the run folder name
-RUN_DESCRIPTION = 'Pilot: emission-min at 400 and 1000 km2 over a budget ladder, to find where Dual_Budget -> 0';  % one sentence: what this run is for
+CODE_VERSION    = 4;   % bump ONLY when a code/data change alters the results (4 = tie-breaking cost term)
+RUN_TAG         = 'main_grid_v4';  % optional short tag added to the run folder name
+RUN_DESCRIPTION = 'Main grid v4: emission-min, 7 land caps x 10 budgets, no nuclear';  % one sentence: what this run is for
 TEST_CELLS      = [];  % moved here from BUILD SCENARIOS
 % Paths (runsRoot, xlsFile, Gurobi) come only from machine_paths.m - edit them there.
 
@@ -159,6 +181,7 @@ if isempty(outDir)
             regCfg.RUN_TAG           = RUN_TAG;
             regCfg.RUN_DESCRIPTION   = RUN_DESCRIPTION;
             regCfg.OBJECTIVE         = OBJECTIVE;
+            regCfg.EPS_COST_TIEBREAK = EPS_COST_TIEBREAK;
             regCfg.ENABLE_NUCLEAR    = ENABLE_NUCLEAR;
             regCfg.ENABLE_BETA_SWEEP = ENABLE_BETA_SWEEP;
             regCfg.betaList          = betaList;
@@ -319,6 +342,7 @@ cBatt_t     = cBatt_t(1:T);
 P_common            = struct();
 
 P_common.OBJECTIVE       = OBJECTIVE;
+P_common.EPS_COST        = EPS_COST_TIEBREAK;   % tCO2e per million NIS (emissions objective only)
 P_common.EmissionsFactor = CARBON_PRICE;      % replaces the fixed 200
 P_common.RE_TARGET_2050  = RE_TARGET_2050;
 

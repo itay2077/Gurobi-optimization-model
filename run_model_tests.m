@@ -47,7 +47,9 @@ function results = run_model_tests(level)
     end
 
     % 1.2 settings
-    R = check(R, 1, 'CODE_VERSION = 3', @() W.CODE_VERSION == 3, sprintf('CODE_VERSION = %d', W.CODE_VERSION));
+    R = check(R, 1, 'CODE_VERSION = 4', @() W.CODE_VERSION == 4, sprintf('CODE_VERSION = %d', W.CODE_VERSION));
+    R = check(R, 1, 'Tie-breaking cost term EPS_COST_TIEBREAK = 0.01', @() abs(W.EPS_COST_TIEBREAK - 0.01) < 1e-12, ...
+        sprintf('EPS_COST_TIEBREAK = %g tCO2e per million NIS', W.EPS_COST_TIEBREAK));
     R = check(R, 1, 'beta = 1 in the reserve margin', @() W.ENABLE_BETA_SWEEP && isequal(W.betaList, 1), ...
         sprintf('ENABLE_BETA_SWEEP = %d, betaList = %s', W.ENABLE_BETA_SWEEP, mat2str(W.betaList)));
     expS = [2.25 3.00 3.75 5.25 6.75];  expB = [1.50 3.00 3.00 3.75 4.50];
@@ -218,8 +220,11 @@ function results = run_model_tests(level)
         R = add(R, 2, sprintf('C1 demand balance rhs at hour %d', t), pf(ok), sprintf('%.1f MW', D(t)));
     end
 
-    % budget as a bound on C(T)
+    % budget as a bound on C(T), tie-breaking term in the objective
     if strcmp(P.OBJECTIVE, 'emissions')
+        R = check(R, 2, 'Objective: tie-breaking coefficient on C(T) = EPS_COST', ...
+            @() abs(M.obj(idxC(T)) - P.EPS_COST) < 1e-12 && nnz(M.obj(idxC(1:T-1))) == 0, ...
+            sprintf('obj(C(T)) = %g', full(M.obj(idxC(T)))));
         R = check(R, 2, 'Budget = upper bound on C(T)', @() abs(M.ub(idxC(T)) - maxCost/1e6) < 1e-6, sprintf('%g million NIS', M.ub(idxC(T))));
     end
     clear A M B

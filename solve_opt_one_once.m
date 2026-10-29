@@ -102,6 +102,13 @@ function RES = solve_opt_one_once(maxCost, maxAreaSolar, maxRamp, betaBattReserv
     obj(idxDump(1:T)) = cSolar_t;     % curtailed solar charged to solar EF
     obj(idxChB(1:T))  = cSolar_t;     % solar sent to battery charged to solar EF
 
+    % Tie-breaking cost term (emissions objective only); explained in OPT_ONE_SENS.m BASIC CONFIG
+    epsCost = 0;
+    if isfield(P, 'EPS_COST') && strcmp(P.OBJECTIVE, 'emissions')
+        epsCost = P.EPS_COST;               % tCO2e per million NIS
+        obj(idxC(T)) = epsCost;
+    end
+
     if strcmp(P.OBJECTIVE, 'cost')
         obj(:)         = 0;
         obj(idxC(T))   = 1;     % minimize total discounted cost (CAPEX + OPEX + carbon cost)
@@ -614,7 +621,13 @@ function RES = solve_opt_one_once(maxCost, maxAreaSolar, maxRamp, betaBattReserv
         Dual_Land_year = -result.pi(landRows);
     end
     if isfield(result,'rc') && ~isempty(result.rc) && isfinite(ub(idxC(T)))
-        Dual_Budget = -result.rc(idxC(T));
+        % rc of C(T) at its upper bound = d(objective)/d(budget) = d(emissions)/d(budget) + epsCost.
+        % Reported: emissions avoided per extra million NIS (0 if the budget does not bind).
+        if result.x(idxC(T)) >= ub(idxC(T)) - 1e-6 * max(1, ub(idxC(T)))
+            Dual_Budget = -result.rc(idxC(T)) + epsCost;
+        else
+            Dual_Budget = 0;
+        end
     end
     % first year in which the land cap is full (level held during that year)
     landLevel   = areaPerSolar * result.x(idxK(2, tLand));   % per row in tLand
@@ -707,7 +720,7 @@ function RES = solve_opt_one_once(maxCost, maxAreaSolar, maxRamp, betaBattReserv
     remainingArea = maxAreaSolar - maxSolarUsed;
 
     % Emissions total
-    totalEmis_t  = result.objval;
+    totalEmis_t  = result.objval - epsCost * result.x(idxC(T));   % remove the tie-breaking term
     totalEmis_Mt = totalEmis_t / 1e6;
 
     endYr = startYr + nYears - 1;

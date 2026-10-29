@@ -1,0 +1,109 @@
+--- /dev/fd/63	2026-10-29 06:48:10.844745751 +0000
++++ /dev/fd/62	2026-10-29 06:48:10.844745751 +0000
+@@ -27,6 +27,8 @@
+ %   (5) Shadow prices saved: land (per year) and budget
+ %   (6) Paths taken only from machine_paths.m; build-rate schedule +50%
+ %   (7) Solver moved to solve_opt_one_once.m (so run_model_tests.m can call it)
++%  CODE_VERSION 4: (8) tie-breaking cost term EPS_COST_TIEBREAK in the emissions
++%       objective (see BASIC CONFIG); budget shadow price corrected for it
+ %% ============================================================
+ 
+ clear; clc;
+@@ -42,8 +44,10 @@
+ % Scenario lists (edit as needed)
+ solarRampList = [150];   % x100 MW/yr = 15 GW/yr; non-binding cap, RAMP_SCHEDULE is the real limit
+ battRampList  = [150];
+-areaList   = [400 600 800 1000 1200 1500 1800 2200];          % km2
+-budgetList = [370 380 395 410 430 450 470 495] * 1e9;         % NIS - TO BE RESET after the cost-min runs (demand path changed)
++areaList   = [400 500 600 700 800 900 1000];                  % km2; ~905 km2 = max solar the build-rate schedule allows, 1000 = land not binding
++budgetList = [382.5 385 387.5 390 392.5 395 400 410 425 450] * 1e9;   % NIS. Dense where emissions fall steeply.
++% Cost-min (run A, v3): 391.1 (400 km2), 387.0 (500), 384.1 (600), 382.7 (700), 382.5 (800-1000) bn NIS.
++% Budgets below a cap's cost-min are INFEASIBLE by design and are kept (they are results too).
+ ENABLE_NUCLEAR = false; % true = allow 3 GW nuclear (built end of 2042)
+ ENABLE_BETA_SWEEP  = true;              % true = sweep battery-ELCC credit in the reserve margin (C13)
+ betaList_onEnabled = [1];  % paper runs: beta = 1 (discussed in the paper, not swept in the main grid)
+@@ -86,12 +90,29 @@
+     [369 2042] };                   % battery: installed ~2022 -> 20 yr -> out from 1.1.2043
+ 
+ OBJECTIVE      = 'emissions';    % 'emissions' (current model) | 'cost' (economic minimum)
++
++% ---- tie-breaking cost term (emissions objective only) ----
++% Objective = total emissions [tCO2e] + EPS_COST_TIEBREAK * C(T) [million NIS].
++% Why: once the budget no longer binds, many solutions have the same minimum
++% emissions and the LP picks an arbitrary one (e.g. 77 GW of idle gas that just
++% spends the budget). The small cost term makes the solver choose the cheapest
++% of the minimum-emission solutions, so reported capacities and costs are real.
++% Why 0.01 tCO2e per million NIS:
++%   * The model would give up 1 t of abatement only to save 100 million NIS
++%     (1/0.01), far above any real abatement cost -> emissions are unaffected.
++%   * Upper bound on the change in emissions: 0.01 x ~4e5 million NIS of total
++%     cost = 4,000 t, i.e. < 0.001% of ~670 Mt (~0.8 million NIS at 200 NIS/t).
++%   * Not smaller: barrier converges to ~1e-8 of the objective (~7 t). With
++%     0.01, wasting 50 bn NIS shows up as 500 t, well above that noise; with
++%     1e-4 it would be 5 t, inside the noise, and ties would stay arbitrary.
++% Set to 0 to recover the pure emissions objective (version 3 behaviour).
++EPS_COST_TIEBREAK = 0.01;   % tCO2e per million NIS
+ CARBON_PRICE   = 200;       % NIS/tCO2e inside the cost (0 = direct-cost minimum)
+ if strcmp(OBJECTIVE, 'cost')
+     budgetList = 1e13;      % effectively unconstrained (one run per land cap)
+ end
+ % ---- run registry ----
+-CODE_VERSION    = 3;   % bump ONLY when a code/data change alters the results
++CODE_VERSION    = 4;   % bump ONLY when a code/data change alters the results (4 = tie-breaking cost term)
+ RUN_TAG         = '';  % optional short tag added to the run folder name
+ RUN_DESCRIPTION = '';  % one sentence: what this run is for
+ TEST_CELLS      = [];  % moved here from BUILD SCENARIOS
+@@ -159,6 +180,7 @@
+             regCfg.RUN_TAG           = RUN_TAG;
+             regCfg.RUN_DESCRIPTION   = RUN_DESCRIPTION;
+             regCfg.OBJECTIVE         = OBJECTIVE;
++            regCfg.EPS_COST_TIEBREAK = EPS_COST_TIEBREAK;
+             regCfg.ENABLE_NUCLEAR    = ENABLE_NUCLEAR;
+             regCfg.ENABLE_BETA_SWEEP = ENABLE_BETA_SWEEP;
+             regCfg.betaList          = betaList;
+@@ -319,6 +341,7 @@
+ P_common            = struct();
+ 
+ P_common.OBJECTIVE       = OBJECTIVE;
++P_common.EPS_COST        = EPS_COST_TIEBREAK;   % tCO2e per million NIS (emissions objective only)
+ P_common.EmissionsFactor = CARBON_PRICE;      % replaces the fixed 200
+ P_common.RE_TARGET_2050  = RE_TARGET_2050;
+ 
+@@ -887,6 +910,13 @@
+     obj(idxDump(1:T)) = cSolar_t;     % curtailed solar charged to solar EF
+     obj(idxChB(1:T))  = cSolar_t;     % solar sent to battery charged to solar EF
+ 
++    % Tie-breaking cost term (emissions objective only); explained in OPT_ONE_SENS.m BASIC CONFIG
++    epsCost = 0;
++    if isfield(P, 'EPS_COST') && strcmp(P.OBJECTIVE, 'emissions')
++        epsCost = P.EPS_COST;               % tCO2e per million NIS
++        obj(idxC(T)) = epsCost;
++    end
++
+     if strcmp(P.OBJECTIVE, 'cost')
+         obj(:)         = 0;
+         obj(idxC(T))   = 1;     % minimize total discounted cost (CAPEX + OPEX + carbon cost)
+@@ -1399,7 +1429,13 @@
+         Dual_Land_year = -result.pi(landRows);
+     end
+     if isfield(result,'rc') && ~isempty(result.rc) && isfinite(ub(idxC(T)))
+-        Dual_Budget = -result.rc(idxC(T));
++        % rc of C(T) at its upper bound = d(objective)/d(budget) = d(emissions)/d(budget) + epsCost.
++        % Reported: emissions avoided per extra million NIS (0 if the budget does not bind).
++        if result.x(idxC(T)) >= ub(idxC(T)) - 1e-6 * max(1, ub(idxC(T)))
++            Dual_Budget = -result.rc(idxC(T)) + epsCost;
++        else
++            Dual_Budget = 0;
++        end
+     end
+     % first year in which the land cap is full (level held during that year)
+     landLevel   = areaPerSolar * result.x(idxK(2, tLand));   % per row in tLand
+@@ -1492,7 +1528,7 @@
+     remainingArea = maxAreaSolar - maxSolarUsed;
+ 
+     % Emissions total
+-    totalEmis_t  = result.objval;
++    totalEmis_t  = result.objval - epsCost * result.x(idxC(T));   % remove the tie-breaking term
+     totalEmis_Mt = totalEmis_t / 1e6;
+ 
+     endYr = startYr + nYears - 1;

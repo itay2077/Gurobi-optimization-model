@@ -50,6 +50,24 @@ function results = run_model_tests(level)
     R = check(R, 1, 'CODE_VERSION = 4', @() W.CODE_VERSION == 4, sprintf('CODE_VERSION = %d', W.CODE_VERSION));
     R = check(R, 1, 'Tie-breaking cost term EPS_COST_TIEBREAK = 0.01', @() abs(W.EPS_COST_TIEBREAK - 0.01) < 1e-12, ...
         sprintf('EPS_COST_TIEBREAK = %g tCO2e per million NIS', W.EPS_COST_TIEBREAK));
+    R = check(R, 1, 'Budget feasibility pre-check switched on (SKIP_INFEASIBLE_BUDGETS)', ...
+        @() islogical(W.SKIP_INFEASIBLE_BUDGETS) && W.SKIP_INFEASIBLE_BUDGETS, ...
+        sprintf('SKIP_INFEASIBLE_BUDGETS = %d', W.SKIP_INFEASIBLE_BUDGETS));
+    % classify_budget logic (pure function, no solve)
+    try
+        c1 = classify_budget(380e9, 391e9, "OPTIMAL");          % below cost-min
+        c2 = classify_budget(395e9, 391e9, "OPTIMAL");          % above
+        c3 = classify_budget(391e9, 391e9, "OPTIMAL");          % equal -> solve
+        c4 = classify_budget(395e9, NaN,   "INFEASIBLE");       % cap infeasible
+        c5 = classify_budget(380e9, NaN,   "TIME_LIMIT");       % unknown -> never skip
+        [~, g] = classify_budget(380e9, 400e9, "OPTIMAL");
+        ok = c1 == "INFEASIBLE_BUDGET" && c2 == "RUN" && c3 == "RUN" && ...
+             c4 == "INFEASIBLE_COSTMIN" && c5 == "RUN" && abs(g + 5) < 1e-9;
+        R = add(R, 1, 'classify_budget: below -> skip, above/equal/unknown -> solve', pf(ok), ...
+            sprintf('%s | %s | %s | %s | %s | gap %.1f%%', c1, c2, c3, c4, c5, g));
+    catch ME
+        R = add(R, 1, 'classify_budget: below -> skip, above/equal/unknown -> solve', 'FAIL', ['error: ' ME.message]);
+    end
     R = check(R, 1, 'beta = 1 in the reserve margin', @() W.ENABLE_BETA_SWEEP && isequal(W.betaList, 1), ...
         sprintf('ENABLE_BETA_SWEEP = %d, betaList = %s', W.ENABLE_BETA_SWEEP, mat2str(W.betaList)));
     expS = [2.25 3.00 3.75 5.25 6.75];  expB = [1.50 3.00 3.00 3.75 4.50];
@@ -259,6 +277,10 @@ function results = run_model_tests(level)
     rel = abs(RES.TotalCost_AllYears / (RES.C(end) * 1e6) - 1);
     R = add(R, 3, 'Post-solve cost = model cost C(T) (capex truncation consistent)', pf(rel < 1e-4), ...
         sprintf('post %.6e vs model %.6e NIS (%.2e rel)', RES.TotalCost_AllYears, RES.C(end)*1e6, rel));
+    cmv = RES.TotalCost_AllYears;
+    ok  = classify_budget(0.99*cmv, cmv, RES.ResultStatus) == "INFEASIBLE_BUDGET" && ...
+          classify_budget(1.01*cmv, cmv, RES.ResultStatus) == "RUN";
+    R = add(R, 3, 'Pre-check on this cost-min: budget -1% skipped, +1% solved', pf(ok), sprintf('cost-min %.4g bn NIS', cmv/1e9));
     R = add(R, 3, 'Land shadow prices returned', pf(any(isfinite(RES.Dual_Land_year))), ...
         sprintf('sum %.4g million NIS/km2, land full in %g', RES.Dual_Land_Sum, RES.LandFullYear));
     R = add(R, 3, 'Info: 2050 capacities [nuc solar gas coal batt] GW', 'PASS', mat2str(round(RES.Cap2050(:)'/1e3, 1)));

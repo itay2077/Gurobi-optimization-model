@@ -29,6 +29,10 @@
 %   (7) Solver moved to solve_opt_one_once.m (so run_model_tests.m can call it)
 %  CODE_VERSION 4: (8) tie-breaking cost term EPS_COST_TIEBREAK in the emissions
 %       objective (see BASIC CONFIG); budget shadow price corrected for it
+%   (9) Budget feasibility pre-check (SKIP_INFEASIBLE_BUDGETS): before an emissions
+%       scenario is solved, the cost-min of its land cap is solved once (cached in
+%       the run folder). Budgets below it are recorded as INFEASIBLE_BUDGET without
+%       solving. Does not change any feasible result.
 %% ============================================================
 
 clear; clc;
@@ -108,14 +112,24 @@ OBJECTIVE      = 'emissions';    % 'emissions' (current model) | 'cost' (economi
 %     1e-4 it would be 5 t, inside the noise, and ties would stay arbitrary.
 % Set to 0 to recover the pure emissions objective (version 3 behaviour).
 EPS_COST_TIEBREAK = 0.01;   % tCO2e per million NIS
+
+% ---- budget feasibility pre-check (emissions objective only) ----
+% For every land cap the model first solves the cost-min problem once (same
+% constraints, no budget) and caches it in the run folder (costmin_cache.mat/.csv).
+% A scenario whose budget is below that minimum cannot be feasible, so it is
+% recorded as INFEASIBLE_BUDGET (with the shortfall) instead of being solved;
+% proving infeasibility directly can take hours (barrier numerical trouble).
+% If the cost-min itself is infeasible, the cap's scenarios are INFEASIBLE_COSTMIN.
+% Works for any inputs/version; nothing is hard-coded. false = solve everything.
+SKIP_INFEASIBLE_BUDGETS = true;
 CARBON_PRICE   = 200;       % NIS/tCO2e inside the cost (0 = direct-cost minimum)
 if strcmp(OBJECTIVE, 'cost')
     budgetList = 1e13;      % effectively unconstrained (one run per land cap)
 end
 % ---- run registry ----
 CODE_VERSION    = 4;   % bump ONLY when a code/data change alters the results (4 = tie-breaking cost term)
-RUN_TAG         = 'main_grid_v4';  % optional short tag added to the run folder name
-RUN_DESCRIPTION = 'Main grid v4: emission-min, 7 land caps x 10 budgets, no nuclear';  % one sentence: what this run is for
+RUN_TAG         = '';  % optional short tag added to the run folder name
+RUN_DESCRIPTION = '';  % one sentence: what this run is for
 TEST_CELLS      = [];  % moved here from BUILD SCENARIOS
 % Paths (runsRoot, xlsFile, Gurobi) come only from machine_paths.m - edit them there.
 
@@ -182,6 +196,7 @@ if isempty(outDir)
             regCfg.RUN_DESCRIPTION   = RUN_DESCRIPTION;
             regCfg.OBJECTIVE         = OBJECTIVE;
             regCfg.EPS_COST_TIEBREAK = EPS_COST_TIEBREAK;
+            regCfg.SKIP_INFEASIBLE_BUDGETS = SKIP_INFEASIBLE_BUDGETS;
             regCfg.ENABLE_NUCLEAR    = ENABLE_NUCLEAR;
             regCfg.ENABLE_BETA_SWEEP = ENABLE_BETA_SWEEP;
             regCfg.betaList          = betaList;
@@ -492,6 +507,38 @@ if fid > 0
     fclose(fid);
 end
 
+%% ---------- KPI COLUMNS (one list used for every row) ----------
+KPI_VARNAMES = { ...
+    'Scenario', ...
+    'NucRampX','SolarRampX','BattRampX', ...
+    'MaxCost','MaxAreaSolar','BetaX', ...
+    'TotalCost_AllYears','TotalEmissions_AllYears', ...
+    'TotalExternalities_AllYears','TotalOPEX_AllYears','TotalCAPEX_AllYears', ...
+    'Emissions_BaseYear','Emissions_TargetYear', ...
+    'Externalities_BaseYear','Externalities_TargetYear','OPEX_BaseYear','OPEX_TargetYear', ...
+    'CAPEX_BaseYear','CAPEX_TargetYear', ...
+    'TotalCost_BaseYear','TotalCost_TargetYear', ...
+    'LCOE_AllYears_NIS_per_kWh', ...
+    'LCOE_BaseYearPlus1_NIS_per_kWh', ...
+    'LCOE_TargetYear_NIS_per_kWh', ...
+    'RenewablesPct2050', ...
+    'Cap2050_Nuclear','Cap2050_Solar','Cap2050_Gas','Cap2050_Coal','Cap2050_Battery', ...
+    'SolarLand_km2', ...
+    'TotalDump_AllYears_MWh','Dump2050_MWh', ...
+    'Dual_Land_Sum','Dual_Budget','LandFullYear', ...
+    'CostMin_Area','BudgetVsMin_pct', ...
+    'Runtime_hrs','ResultStatus','MIPGap' };
+
+%% ---------- COST-MIN CACHE (budget feasibility pre-check) ----------
+doPreCheck = strcmp(OBJECTIVE, 'emissions') && SKIP_INFEASIBLE_BUDGETS;
+cmCacheFile = fullfile(outDir, 'costmin_cache.mat');
+CM = table('Size', [0 8], ...
+    'VariableTypes', {'double','double','double','double','double','double','double','string'}, ...
+    'VariableNames', {'Area','Beta','SolarRampX','BattRampX','NucRampX','RE_TARGET_2050','CostMin_NIS','Status'});
+if isfile(cmCacheFile)
+    Lcm = load(cmCacheFile, 'CM');  CM = Lcm.CM;  clear Lcm
+end
+
 %% ---------- RUN LOOP: COMPLETED & SKIP LOGIC ----------
 KPI_rows   = table();
 runCounter = 0;
@@ -505,7 +552,8 @@ for kk = 1:nAll
     else
         hasResults2 = isfile(fullfile(scDir2, 'results_heavy.mat'));
         hasError2   = isfile(fullfile(scDir2, 'error.txt'));
-        if ~(hasResults2 || hasError2)
+        hasInf2     = isfile(fullfile(scDir2, 'infeasible_budget.txt'));
+        if ~(hasResults2 || hasError2 || hasInf2)
             nToRun = nToRun + 1;
         end
     end
@@ -528,9 +576,13 @@ for k = 1:nAll
     else
         hasResults = isfile(fullfile(scDir, 'results_heavy.mat'));
         hasError   = isfile(fullfile(scDir, 'error.txt'));
+        hasInf     = isfile(fullfile(scDir, 'infeasible_budget.txt'));
         if hasResults
             needToRun  = false;
             reasonSkip = 'completed (results_heavy.mat exists)';
+        elseif hasInf
+            needToRun  = false;
+            reasonSkip = 'recorded as infeasible budget (infeasible_budget.txt exists)';
         elseif hasError
             needToRun  = false;
             reasonSkip = 'previous error (error.txt exists)';
@@ -543,6 +595,20 @@ for k = 1:nAll
     if ~needToRun
         fprintf('[SKIP] %s - %s\n', scName, reasonSkip);
         continue;
+    end
+
+    % ---- budget feasibility pre-check (cost-min of this land cap, cached) ----
+    costMinK = NaN;  gapPctK = NaN;
+    if doPreCheck
+        [costMinK, cmStatK, CM] = get_costmin(CM, cmCacheFile, Sc(k), RE_TARGET_2050, P_common, outDir);
+        [budgetStatus, gapPctK] = classify_budget(Sc(k).maxCost, costMinK, cmStatK);
+        if budgetStatus ~= "RUN"
+            if ~isfolder(scDir), mkdir(scDir); end
+            write_infeasible_row(scDir, scName, Sc(k), budgetStatus, costMinK, gapPctK, KPI_VARNAMES);
+            fprintf('[%s] %s - budget %.4g bn NIS vs cost-min %.4g bn NIS (%.2f%%), not solved\n', ...
+                budgetStatus, scName, Sc(k).maxCost/1e9, costMinK/1e9, gapPctK);
+            continue;
+        end
     end
 
     % We will run this scenario
@@ -659,6 +725,10 @@ for k = 1:nAll
         Dual_Budget               = RES.Dual_Budget;
         LandFullYear              = RES.LandFullYear;
 
+        % Budget relative to the cost-min of this land cap (NaN if no pre-check)
+        CostMin_Area              = costMinK;
+        BudgetVsMin_pct           = gapPctK;
+
         % Technical run info
         durSec       = toc(t0);
         Runtime_hrs  = durSec / 3600;
@@ -697,28 +767,9 @@ for k = 1:nAll
         SolarLand_km2, ...
         TotalDump_AllYears_MWh, Dump2050_MWh, ...
         Dual_Land_Sum, Dual_Budget, LandFullYear, ...
+        CostMin_Area, BudgetVsMin_pct, ...
         Runtime_hrs, ResultStatus, MIPGap, ...
-        'VariableNames', { ...
-            'Scenario', ...
-            'NucRampX','SolarRampX','BattRampX', ...
-            'MaxCost','MaxAreaSolar','BetaX', ...
-            'TotalCost_AllYears','TotalEmissions_AllYears', ...
-            'TotalExternalities_AllYears','TotalOPEX_AllYears','TotalCAPEX_AllYears', ...
-            'Emissions_BaseYear','Emissions_TargetYear', ...
-            'Externalities_BaseYear','Externalities_TargetYear','OPEX_BaseYear','OPEX_TargetYear', ...
-            'CAPEX_BaseYear','CAPEX_TargetYear', ...
-            'TotalCost_BaseYear','TotalCost_TargetYear', ...
-            'LCOE_AllYears_NIS_per_kWh', ...
-            'LCOE_BaseYearPlus1_NIS_per_kWh', ...
-            'LCOE_TargetYear_NIS_per_kWh', ...
-            'RenewablesPct2050', ...
-            'Cap2050_Nuclear','Cap2050_Solar','Cap2050_Gas','Cap2050_Coal','Cap2050_Battery', ...
-            'SolarLand_km2', ...
-            'TotalDump_AllYears_MWh','Dump2050_MWh', ...
-            'Dual_Land_Sum','Dual_Budget','LandFullYear', ...
-            'Runtime_hrs','ResultStatus','MIPGap' ...
-        } ...
-    );
+        'VariableNames', KPI_VARNAMES);
 
 
         % Append to accumulator
@@ -767,7 +818,30 @@ end
 fKPI = dir(fullfile(d_scen, '*', 'kpi_row.csv'));
 KPI_rows = table();
 for kk = 1:numel(fKPI)
-    KPI_rows = [KPI_rows; readtable(fullfile(fKPI(kk).folder, fKPI(kk).name))]; %#ok<AGROW>
+    Tk = readtable(fullfile(fKPI(kk).folder, fKPI(kk).name), 'TextType', 'string');
+    for vn = KPI_VARNAMES                      % rows written before a column existed -> NaN
+        if ~ismember(vn{1}, Tk.Properties.VariableNames)
+            Tk.(vn{1}) = NaN(height(Tk), 1);
+        end
+    end
+    Tk.ResultStatus = string(Tk.ResultStatus);
+    Tk.Scenario     = string(Tk.Scenario);
+    KPI_rows = [KPI_rows; Tk(:, KPI_VARNAMES)]; %#ok<AGROW>
+end
+% fill CostMin_Area / BudgetVsMin_pct from the cache where missing (e.g. rows from before the pre-check)
+if ~isempty(KPI_rows) && height(CM) > 0
+    for r = 1:height(KPI_rows)
+        if isnan(KPI_rows.CostMin_Area(r))
+            h = find(CM.Area == KPI_rows.MaxAreaSolar(r) & CM.Beta == KPI_rows.BetaX(r) & ...
+                     CM.SolarRampX == KPI_rows.SolarRampX(r) & CM.BattRampX == KPI_rows.BattRampX(r) & ...
+                     CM.NucRampX == KPI_rows.NucRampX(r) & CM.RE_TARGET_2050 == RE_TARGET_2050 & ...
+                     CM.Status == "OPTIMAL", 1);
+            if ~isempty(h)
+                KPI_rows.CostMin_Area(r)    = CM.CostMin_NIS(h);
+                KPI_rows.BudgetVsMin_pct(r) = 100 * (KPI_rows.MaxCost(r) / CM.CostMin_NIS(h) - 1);
+            end
+        end
+    end
 end
 if ~isempty(KPI_rows)
     KPI = KPI_rows;
@@ -807,3 +881,54 @@ function print_banner(txt)
 end
 
 % The solver (solve_opt_one_once) and addCoef live in solve_opt_one_once.m
+
+function [costMin, cmStatus, CM] = get_costmin(CM, cacheFile, ScK, reTarget, P_common, outDir)
+% Cost-min of this scenario's land cap (same ramps, beta and RE target), from the
+% run-folder cache or solved once and added to it.
+    key = [ScK.maxAreaSolar, ScK.betaBattReserve, ScK.meta.SolarRamp, ScK.meta.BattRamp, ScK.meta.NucRamp, reTarget];
+    h = find(CM.Area == key(1) & CM.Beta == key(2) & CM.SolarRampX == key(3) & ...
+             CM.BattRampX == key(4) & CM.NucRampX == key(5) & CM.RE_TARGET_2050 == key(6), 1);
+    if isempty(h)
+        fprintf('\n[PRE-CHECK] solving cost-min for land %g km2 (beta %g) ...\n', key(1), key(2));
+        PC = P_common;  PC.OBJECTIVE = 'cost';
+        try
+            Rcm = solve_opt_one_once(1e13, ScK.maxAreaSolar, ScK.maxRamp, ScK.betaBattReserve, PC);
+            st  = string(Rcm.ResultStatus);
+            if st == "OPTIMAL", cmv = Rcm.TotalCost_AllYears; else, cmv = NaN; end
+        catch ME
+            st  = "ERROR"; cmv = NaN;
+            warning('Cost-min pre-check failed: %s', ME.message);
+        end
+        CM = [CM; {key(1), key(2), key(3), key(4), key(5), key(6), cmv, st}];
+        save(cacheFile, 'CM');
+        writetable(CM, fullfile(outDir, 'costmin_cache.csv'));
+        fprintf('[PRE-CHECK] land %g km2: cost-min = %.4g bn NIS (%s)\n', key(1), cmv/1e9, st);
+        h = height(CM);
+    end
+    costMin  = CM.CostMin_NIS(h);
+    cmStatus = CM.Status(h);
+end
+
+function write_infeasible_row(scDir, scName, ScK, budgetStatus, costMin, gapPct, KPI_VARNAMES)
+% KPI row for a scenario that is not solved because its budget is infeasible.
+    s = cell2struct(num2cell(nan(1, numel(KPI_VARNAMES))), KPI_VARNAMES, 2);
+    s.Scenario        = string(scName);
+    s.NucRampX        = ScK.meta.NucRamp;
+    s.SolarRampX      = ScK.meta.SolarRamp;
+    s.BattRampX       = ScK.meta.BattRamp;
+    s.MaxCost         = ScK.maxCost;
+    s.MaxAreaSolar    = ScK.maxAreaSolar;
+    s.BetaX           = ScK.betaBattReserve;
+    s.CostMin_Area    = costMin;
+    s.BudgetVsMin_pct = gapPct;
+    s.Runtime_hrs     = 0;
+    s.ResultStatus    = string(budgetStatus);
+    writetable(struct2table(s), fullfile(scDir, 'kpi_row.csv'));
+    fid = fopen(fullfile(scDir, 'infeasible_budget.txt'), 'w', 'n', 'UTF-8');
+    if fid > 0
+        fprintf(fid, '%s\nBudget %.6g NIS, cost-min of this land cap %.6g NIS (%.3f%%).\n', ...
+            budgetStatus, ScK.maxCost, costMin, gapPct);
+        fprintf(fid, 'Not solved: a budget below the cost-min cannot be feasible.\n');
+        fclose(fid);
+    end
+end

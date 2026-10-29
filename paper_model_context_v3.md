@@ -73,6 +73,7 @@
    - כל ארבעת הקבצים צריכים להיות באותה תיקייה.
 
 8. **גרסה 4:** נוסף `EPS_COST_TIEBREAK = 0.01`. מחיר הצל של התקציב מתוקן כך שלא יכלול את איבר ה-ε. `CODE_VERSION = 4`.
+9. **בדיקה מוקדמת של התקציב (`SKIP_INFEASIBLE_BUDGETS = true`):** במזעור פליטות, המודל פותר קודם מזעור עלות פעם אחת לכל תקרת קרקע, ושומר אותו בתיקיית הריצה (`costmin_cache.mat` ו-`.csv`). תרחיש שהתקציב שלו נמוך מהעלות המינימלית נרשם כ-`INFEASIBLE_BUDGET` בלי שנפתר, יחד עם גודל החוסר. בטבלת התוצאות נוספו העמודות `CostMin_Area` ו-`BudgetVsMin_pct`. ההחלטה נעשית ב-`classify_budget.m`. השינוי לא משנה אף תוצאה פיזיבילית, ולכן הגרסה נשארת 4.
 
 **שינויים באקסל `ROTH 1 Model - Itay.xlsx`:**
 - **גיליון "חישוב אחוזים":**
@@ -144,6 +145,7 @@
 | `OPT_ONE_SENS.m` | עודכן (גרסה 4) | |
 | `solve_opt_one_once.m` | **חדש** | חייב להיות באותה תיקייה כמו הסקריפט |
 | `run_model_tests.m` | **חדש** | |
+| `classify_budget.m` | **חדש** | חייב להיות באותה תיקייה כמו הסקריפט |
 | `verify_results.py` | **חדש** | בדיקה עצמאית של קובץ `.mat` של תרחיש. דורש Python עם `numpy` ו-`h5py` |
 | `machine_paths.m` | לבדוק | במעבדה: `D:\optimization_runs`, ‏`D:\optimization_model\ROTH 1 Model - Itay.xlsx`, ‏`D:\gurobi1303\win64\matlab`. כדאי גם להוריד את שורת `registry_root` שמדפיסה פלט מיותר |
 | `paper_model_context_v3.md` | חדש | הקובץ הזה |
@@ -152,7 +154,7 @@
 **סדר הפעולות:**
 1. **במחשב האישי:**
    ```
-   git add OPT_ONE_SENS.m solve_opt_one_once.m run_model_tests.m verify_results.py machine_paths.m paper_model_context_v3.md
+   git add OPT_ONE_SENS.m solve_opt_one_once.m run_model_tests.m classify_budget.m verify_results.py machine_paths.m paper_model_context_v3.md
    git commit -m "Model v4: Noga 2022 demand, retirement, annual land rows, duals, eps tie-break, tests"
    git push
    ```

@@ -437,7 +437,7 @@ function [outDir, info] = reg_new_run(c)
 
     codeMD5 = md5_text_after(c.codeFile, MARKER);
     dataMD5 = md5_file(c.dataFile);
-    check_version(reg, vdir, V, codeMD5, dataMD5);
+    check_version(reg, vdir, V, codeMD5, dataMD5, logical(getf(c, 'SENS_DATA_VARIANT', false)));
 
     if strcmpi(c.OBJECTIVE, 'cost'), o = 'COST'; else, o = 'EMIS'; end
     if c.ENABLE_NUCLEAR, n = 'nuc'; else, n = 'noNuc'; end
@@ -482,6 +482,7 @@ function [outDir, info] = reg_new_run(c)
     info.data_md5        = dataMD5;
     info.code_file       = c.codeFile;
     info.data_file       = c.dataFile;
+    info.data_variant    = logical(getf(c, 'SENS_DATA_VARIANT', false));
     write_json(fullfile(outDir, 'meta', 'run_config.json'), info);
 
     [~, base] = fileparts(c.codeFile);
@@ -489,7 +490,8 @@ function [outDir, info] = reg_new_run(c)
     fprintf('\nNew run %s\n  %s\n', info.run_id, outDir);
 end
 
-function check_version(reg, vdir, V, codeMD5, dataMD5)
+function check_version(reg, vdir, V, codeMD5, dataMD5, dataVariant)
+    if nargin < 6, dataVariant = false; end
     vfile = fullfile(vdir, 'version_info.json');
     if ~isfile(vfile)
         write_json(vfile, new_version_info(V, codeMD5, dataMD5, ''));
@@ -507,6 +509,12 @@ function check_version(reg, vdir, V, codeMD5, dataMD5)
     if ~strcmp(vi.code_md5, codeMD5), chg{end+1} = 'model code'; end
     if ~strcmp(vi.data_md5, dataMD5), chg{end+1} = 'input data file'; end
     if isempty(chg), return; end
+    if dataVariant && isequal(chg, {'input data file'})
+        % deliberate sensitivity variant of the Excel (switch on): no question,
+        % and the version fingerprint is NOT updated
+        fprintf('Note: input data file differs from V%d (sensitivity data variant) - fingerprint kept.\n', V);
+        return
+    end
 
     fprintf(2, '\nWARNING: the %s changed since version V%d was fingerprinted.\n', strjoin(chg, ' and '), V);
     resp = input(sprintf('Results expected to be identical (no model change)? [y = keep V%d / n = abort]: ', V), 's');

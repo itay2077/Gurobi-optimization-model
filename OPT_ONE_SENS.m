@@ -131,6 +131,28 @@ CODE_VERSION    = 4;   % bump ONLY when a code/data change alters the results (4
 RUN_TAG         = '';  % optional short tag added to the run folder name
 RUN_DESCRIPTION = '';  % one sentence: what this run is for
 TEST_CELLS      = [];  % moved here from BUILD SCENARIOS
+
+% ---- automation (used only by run_sensitivities.m; leave false for manual runs) ----
+% AUTO_NEW_RUN      : true = no questions, always create a new run folder
+% SENS_DATA_VARIANT : true = the Excel is a deliberate sensitivity variant (switch on);
+%                     registry.m then skips the "input data file changed" question and
+%                     does NOT update the version fingerprint
+AUTO_NEW_RUN      = false;
+SENS_DATA_VARIANT = false;
+
+% ---- optional per-run overrides (written and deleted by run_sensitivities.m) ----
+% If run_overrides.m exists next to this script, its assignments replace the
+% settings above. It is printed in full and copied into the run's meta folder.
+ovrFile = fullfile(fileparts(mfilename('fullpath')), 'run_overrides.m');
+usedOverrides = isfile(ovrFile);
+if usedOverrides
+    fprintf('\n*** USING run_overrides.m ***\n');
+    type(ovrFile);
+    run(ovrFile);
+    % settings derived from the overridden ones
+    if ENABLE_BETA_SWEEP, betaList = betaList_onEnabled; else, betaList = 0; end
+    if strcmp(OBJECTIVE, 'cost'), budgetList = 1e13; end
+end
 % Paths (runsRoot, xlsFile, Gurobi) come only from machine_paths.m - edit them there.
 
 
@@ -144,7 +166,7 @@ ptrFile = fullfile(latestDir, 'pointer.txt');
 
 outDir = '';
 % 1) Try read pointer
-if isfile(ptrFile)
+if isfile(ptrFile) && ~AUTO_NEW_RUN
     try
         cand = strtrim(fileread(ptrFile));
         if isfolder(cand)
@@ -176,7 +198,11 @@ end
 
 % 2) If still empty, ask user: choose existing or create new
 if isempty(outDir)
-    resp2 = input('Create new run folder (N) or choose existing (C)? [N/C]: ', 's');
+    if AUTO_NEW_RUN
+        resp2 = 'N';                                  % automated run: always a new folder
+    else
+        resp2 = input('Create new run folder (N) or choose existing (C)? [N/C]: ', 's');
+    end
     if isempty(resp2)
         resp2 = 'N';
     end
@@ -215,6 +241,7 @@ if isempty(outDir)
             regCfg.DC_START_YEAR     = DC_START_YEAR;
             regCfg.ENABLE_RETIREMENT = ENABLE_RETIREMENT;
             regCfg.LEGACY_RETIRE     = LEGACY_RETIRE;
+            regCfg.SENS_DATA_VARIANT = SENS_DATA_VARIANT;
             outDir = registry('new_run', regCfg);
         otherwise
             error('Unrecognized choice. Aborting.');
@@ -230,6 +257,10 @@ for dd = {outDir, d_scen, d_tbls, d_logs, d_meta}
     if ~isfolder(dd{1})
         mkdir(dd{1});
     end
+end
+
+if usedOverrides
+    copyfile(ovrFile, fullfile(d_meta, 'run_overrides_used.m.txt'));   % record of the per-run settings
 end
 
 % 4) Update pointer.txt to the current outDir

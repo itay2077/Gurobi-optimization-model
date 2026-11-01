@@ -68,6 +68,10 @@ function results = run_model_tests(level)
     catch ME
         R = add(R, 1, 'classify_budget: below -> skip, above/equal/unknown -> solve', 'FAIL', ['error: ' ME.message]);
     end
+    R = check(R, 1, 'No leftover run_overrides.m next to the script', @() ~isfile(fullfile(here, 'run_overrides.m')), ...
+        'run_overrides.m is written and deleted by run_sensitivities.m; if it exists, delete it');
+    R = check(R, 1, 'Automation flags off for manual runs (AUTO_NEW_RUN, SENS_DATA_VARIANT)', ...
+        @() ~W.AUTO_NEW_RUN && ~W.SENS_DATA_VARIANT, sprintf('AUTO_NEW_RUN = %d, SENS_DATA_VARIANT = %d', W.AUTO_NEW_RUN, W.SENS_DATA_VARIANT));
     R = check(R, 1, 'beta = 1 in the reserve margin', @() W.ENABLE_BETA_SWEEP && isequal(W.betaList, 1), ...
         sprintf('ENABLE_BETA_SWEEP = %d, betaList = %s', W.ENABLE_BETA_SWEEP, mat2str(W.betaList)));
     expS = [2.25 3.00 3.75 5.25 6.75];  expB = [1.50 3.00 3.00 3.75 4.50];
@@ -133,6 +137,12 @@ function results = run_model_tests(level)
     % 1.6 cost tables
     % The model reads the cost rows BY POSITION (row 1 = 2023 ... row 28 = 2050).
     % Rows below 2050 (e.g. a 2050 target and a decline factor) are allowed but not used.
+    nc = [size(W.capMatrix,2), size(W.opMatrix,2), size(W.varMatrix,2)];
+    R = add(R, 1, 'Cost sheets have exactly 5 source columns (nuclear, solar, gas, coal, battery)', pf(all(nc == 5)), ...
+        sprintf('columns read: capex %d, opex %d, var-opex %d. Any extra filled column next to the table is read as a source and breaks the model', nc));
+    if ~all(nc == 5)
+        results = finish(R, t0);  return;
+    end
     C28 = [W.capMatrix(1:28,:); W.opMatrix(1:28,:); W.varMatrix(1:28,:)];
     okC = size(W.capMatrix,1) >= 28 && size(W.opMatrix,1) >= 28 && size(W.varMatrix,1) >= 28 && ...
           isequal(W.years(1:28)', 2023:2050) && all(isfinite(C28(:))) && all(C28(:) >= 0);

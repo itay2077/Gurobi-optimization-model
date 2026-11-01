@@ -148,7 +148,14 @@ usedOverrides = isfile(ovrFile);
 if usedOverrides
     fprintf('\n*** USING run_overrides.m ***\n');
     type(ovrFile);
-    run(ovrFile);
+    % executed line by line from the file text (not with run), so MATLAB never
+    % uses a cached copy of an earlier run_overrides.m
+    ovrLines = splitlines(string(fileread(ovrFile)));
+    for iL = 1:numel(ovrLines)
+        if strlength(strtrim(ovrLines(iL))) > 0
+            eval(char(ovrLines(iL)));
+        end
+    end
     % settings derived from the overridden ones
     if ENABLE_BETA_SWEEP, betaList = betaList_onEnabled; else, betaList = 0; end
     if strcmp(OBJECTIVE, 'cost'), budgetList = 1e13; end

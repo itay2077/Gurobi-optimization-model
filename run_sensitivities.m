@@ -6,6 +6,7 @@ function run_sensitivities(which, mode)
 %   run_sensitivities('D2')           % data centres - Excel 'Read Me'!B2 = 1           (6 runs)
 %   run_sensitivities('S')            % storage cost x1.5 - Excel 'Read Me'!B3 = 1.5 (4 runs)
 %   run_sensitivities({'D1','B0'})    % any subset of setting ids
+%   run_sensitivities('A15L')         % deployment x2 at 1,500 and 2,000 km2 (added 2.11)   (10 runs)
 %
 % Every setting is run in two phases, each as its own OPT_ONE_SENS run:
 %   1) cost   : least-cost run per land cap  -> C* (TotalCost_AllYears)
@@ -131,6 +132,9 @@ function S = settings_table()
                   {'DEMAND_PATH = ''noga2026_high'';'});
     S(end+1) = mk('D2',   'data centres 2 GW 2027 -> 3 GW 2030 -> 4.2 GW 2050 (Excel)', 'DC', [400 600 1000], 1.05, {});
     S(end+1) = mk('A15',  'deployment rate 2x Table 2', 'base', [400 600 1000], [1.025 1.05 1.10 1.20], ...
+                  {'RAMP_SCHEDULE.solar = [2025 4.5; 2030 6.0; 2035 7.5; 2040 10.5; 2050 13.5];', ...
+                   'RAMP_SCHEDULE.batt  = [2025 3.0; 2030 6.0; 2035 6.0; 2040 7.5; 2050 9.0];'});
+    S(end+1) = mk('A15L', 'deployment rate 2x Table 2, land 1,500 (solar-led) and 2,000 km2 (land not binding)', 'base', [1500 2000], [1.025 1.05 1.10 1.20], ...
                   {'RAMP_SCHEDULE.solar = [2025 4.5; 2030 6.0; 2035 7.5; 2040 10.5; 2050 13.5];', ...
                    'RAMP_SCHEDULE.batt  = [2025 3.0; 2030 6.0; 2035 6.0; 2040 7.5; 2050 9.0];'});
     S(end+1) = mk('B06',  'storage capacity credit beta = 0.6',  'base', [400 1000], 1.05, ...
